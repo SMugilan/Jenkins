@@ -1,1 +1,103 @@
+pipeline {
+    agent any
+
+    tools {
+        maven 'MAVEN3'          // Jenkins Maven tool name
+        jdk   'OracleJDK17'     // Jenkins JDK tool name
+    }
+
+    environment {
+        JAVA_HOME = tool 'OracleJDK17'
+        PATH = "${JAVA_HOME}/bin:${PATH}"
+    }
+
+    stages {
+
+        stage('Fetch Code') {
+            steps {
+                git branch: 'vp-rem', url: 'https://github.com/infratute/devops-repo-all.git'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh 'mvn install -DskipTests'
+            }
+            post {
+                success {
+                    echo "Now Archiving"
+                    archiveArtifacts artifacts: '**/*.war'
+                }
+            }
+        }
+
+        stage('UNIT TEST') {
+            steps {
+                // Only run tests compatible with Java 17
+                sh 'mvn test -Dtest=RoleTest,UserTest,SampleTest'
+            }
+        }
+
+        stage('Checkstyle Analysis') {
+            steps {
+                sh 'mvn checkstyle:checkstyle'
+            }
+        }
+
+        stage('Sonar Analysis') {
+            environment {
+                scannerHome = tool 'sonar4.7'   // Sonar Scanner name in Jenkins
+            }
+            steps {
+                withSonarQubeEnv('sonar') {     // SonarQube server name in Jenkins
+                    sh '''
+                        ${scannerHome}/bin/sonar-scanner \
+                        -Dsonar.projectKey=vprofile \
+                        -Dsonar.projectName=vprofile \
+                        -Dsonar.projectVersion=1.0 \
+                        -Dsonar.sources=src/main/java \
+                        -Dsonar.tests=src/test/java \
+                        -Dsonar.java.binaries=target/classes \
+                        -Dsonar.java.test.binaries=target/test-classes \
+                        -Dsonar.junit.reportPaths=target/surefire-reports \
+                        -Dsonar.jacoco.reportsPath=target/jacoco.exec \
+                        -Dsonar.java.checkstyle.reportPaths=target/checkstyle-result.xml
+                    '''
+                }
+            }
+        }
+
+        /*
+        // 
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+        */
+
+        stage('UploadArtifact') {
+            steps {
+                nexusArtifactUploader(
+                    nexusVersion:  'nexus3',
+                    protocol:      'http',
+                    nexusUrl:      '34.150.200.48:8081',   // Nexus IP:PORT
+                    groupId:       'QA',
+                    version:       "${env.BUILD_NUMBER}",
+                    repository:    'vprofile-repo',
+                    credentialsId: 'nexuslogin',
+                    artifacts: [[
+                        artifactId: 'vproapp',
+                        classifier: '',
+                        file:       'target/vprofile-v2.war',
+                        type:       'war'
+                    ]]
+                )
+            }
+        }
+
+    }
+}
 
