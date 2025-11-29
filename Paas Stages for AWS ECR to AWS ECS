@@ -1,1 +1,148 @@
+def COLOR_MAP = [
+    'SUCCESS': 'good',
+    'FAILURE': 'danger',
+]
+
+def dockerImage
+
+pipeline {
+    agent any
+
+    tools {
+        maven 'MAVEN3'
+        jdk   'OracleJDK17'
+    }
+
+    environment {
+        registryCredential = 'ecr:us-west-2:awscreds'
+        appRegistry        = "803989607579.dkr.ecr.us-west-2.amazonaws.com/vprofileappimg"
+        vprofileRegistry   = "https://803989607579.dkr.ecr.us-west-2.amazonaws.com"
+
+        cluster = "vprofile-cluster"                   
+        service = "vprofile-task-service-e6w8zpkv"     
+    }
+
+    stages {
+
+        stage('Fetch Code') {
+            steps {
+                git branch: 'docker', url: 'https://github.com/infratute/baseline-vprofile-project-complete.git'
+            }
+        }
+
+        stage('Fix Dockerfile') {
+            steps {
+                writeFile file: 'Docker-files/app/multistage/Dockerfile', text: '''# ------------ BUILD STAGE ------------
+FROM eclipse-temurin:8-jdk AS BUILD_IMAGE
+
+RUN apt-get update && apt-get install -y maven git && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN git clone -b vp-docker https://github.com/imranvisualpath/vprofile-repo.git
+
+WORKDIR /app/vprofile-repo
+RUN mvn clean package -DskipTests
+
+# ------------ RUNTIME STAGE ------------
+FROM tomcat:8.5-jdk8-temurin
+
+RUN rm -rf /usr/local/tomcat/webapps/*
+
+COPY --from=BUILD_IMAGE /app/vprofile-repo/target/vprofile-v2.war /usr/local/tomcat/webapps/ROOT.war
+
+EXPOSE 8080
+CMD ["catalina.sh", "run"]
+'''
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh 'mvn install -DskipTests'
+            }
+            post {
+                success {
+                    echo "Now Archiving"
+                    archiveArtifacts artifacts: '**/*.war'
+                }
+            }
+        }
+
+        stage('UNIT TEST') {
+            steps {
+                sh 'mvn test -Dtest=com.visualpathit.account.modelTest.RoleTest,com.visualpathit.account.modelTest.UserTest,com.visualpathit.account.controllerTest.SampleTest'
+            }
+        }
+
+        stage('Checkstyle Analysis') {
+            steps {
+                sh 'mvn checkstyle:checkstyle'
+            }
+        }
+
+        stage('Sonar Analysis') {
+            environment {
+                scannerHome = tool 'sonar4.7'
+            }
+            steps {
+                withSonarQubeEnv('sonar') {
+                    sh '''
+                        ${scannerHome}/bin/sonar-scanner \
+                        -Dsonar.projectKey=vprofile \
+                        -Dsonar.projectName=vprofile \
+                        -Dsonar.projectVersion=1.0 \
+                        -Dsonar.sources=src/main/java \
+                        -Dsonar.tests=src/test/java \
+                        -Dsonar.java.binaries=target/classes \
+                        -Dsonar.java.test.binaries=target/test-classes \
+                        -Dsonar.junit.reportPaths=target/surefire-reports \
+                        -Dsonar.jacoco.reportsPath=target/jacoco.exec \
+                        -Dsonar.java.checkstyle.reportPaths=target/checkstyle-result.xml
+                    '''
+                }
+                // Optional QG:
+                // timeout(time: 10, unit: 'MINUTES') {
+                //     waitForQualityGate abortPipeline: true
+                // }
+            }
+        }
+
+        stage('Build App Image') {
+            steps {
+                script {
+                    JD_IMAGE = "${appRegistry}:${BUILD_NUMBER}"
+                    dockerImage = docker.build(JD_IMAGE, "./Docker-files/app/multistage/")
+                }
+            }
+        }
+
+        stage('Upload App Image') {
+            steps {
+                script {
+                    docker.withRegistry(vprofileRegistry, registryCredential) {
+                        dockerImage.push("${BUILD_NUMBER}")
+                        dockerImage.push('latest')
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to ecs') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding',
+                                  credentialsId: 'awscreds',
+                                  accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                                  secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                    sh '''
+                      aws ecs update-service \
+                        --cluster $cluster \
+                        --service $service \
+                        --force-new-deployment \
+                        --region us-west-2
+                    '''
+                }
+            }
+        }
+    }
+}
 
